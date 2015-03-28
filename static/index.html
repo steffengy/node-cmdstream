@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <link href="style.css" rel="stylesheet" media="screen">
+    <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/angular.js/1.3.15/angular.min.js"></script>
+    <script type="text/javascript">
+        var terminalLog = angular.module('terminalLog', []);
+        var activeCmd = 0;
+        var atBottom = false;
+        var ws = new WebSocket('ws://' + location.host);
+        
+        /* Check if we are at the bottom of the page */
+        window.onscroll = function(ev) {
+            if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight) {
+                atBottom = true;
+            } else {
+                atBottom = false;
+            }
+        };
+        
+        terminalLog.controller('TerminalLogCtrl', function ($rootScope, $scope) {
+            ws.onclose = function(err) { $scope.ws = null; $scope.$apply(); }
+            
+            $scope.ws = ws;
+            $scope.log = [];
+            $scope.logIdMap = {};
+            $scope.getId = function (key, elem) {
+                return angular.isArray(elem.childs) ? 'fold-start' + key : '';
+            };
+            
+            var buildLogIdMap = function () {
+                var logIdMap = {};
+                $scope.log.forEach(function (logEntry) {
+                    if (logEntry.id) {
+                        logIdMap[logEntry.id] = logEntry;
+                        activeCmd = logEntry.id;
+                    }
+                });
+                $scope.logIdMap = logIdMap;
+            };
+            
+            /* Handle input */
+            ws.onmessage = function (event) {
+                var data = JSON.parse(event.data);
+                if (data.type == 'fulllog') {
+                    $scope.log = data.data;
+                    buildLogIdMap();
+                } else if (data.type == 'newcmd') {
+                    $scope.log.push(data.data);
+                    $scope.logIdMap[data.data.id] = data.data;
+                    activeCmd = data.data.id;
+                    $rootScope.$emit('newactive');
+                } else if (data.type == 'newlog') {
+                    if (data.lastId == null) {
+                        $scope.log.push(data.data);
+                    } else {
+                        $scope.logIdMap[data.lastId].childs.push(data.data);
+                    }
+                } else if (data.type == 'appendlog') {
+                    if (data.lastId == null) {
+                        $scope.log[$scope.log.length - 1].text += data.data;
+                    } else {
+                        var targetTmp = $scope.logIdMap[data.lastId].childs;
+                        targetTmp[targetTmp.length - 1].text += data.data;
+                    }
+                } else {
+                    console.error('Unknown command ' + data.type);
+                }
+                $scope.$apply();
+                if (atBottom) window.scrollTo(0,document.body.scrollHeight);
+            };
+        });
+        
+        terminalLog.directive('tlRenderLogs', function ($rootScope, $compile) {
+            return {
+                restrict: 'E',
+                template: '',
+                replace: true,
+                scope: {
+                    parent: '=parententry',
+                    parentid: '=parentid'
+                },
+                link: function (scope, element) {
+                    /* Remove it, if no children or (valid) parent */
+                    if (!scope.parent.hasOwnProperty("childs") || !scope.parent.id) 
+                    {
+                        element.append('<p><a></a>{{parent.text}}</p>');
+                        $compile(element.contents())(scope);
+                        /* Replace the directive with the element, (hopefully) without breaking any listeners/internals */
+                        element.replaceWith(element[0].firstChild);
+                        return;
+                    }
+                    /* Expand / Collapse children */
+                    
+                    scope.uncollapsed = 0; //STATE: collapsed
+                    if (activeCmd == scope.parent.id) {
+                        scope.uncollapsed = -1; //STATE: temporarily uncollapsed
+                        var dereg = $rootScope.$on('newactive', function() { 
+                            dereg(); 
+                            scope.uncollapsed = scope.uncollapsed == -1 ? 0 : scope.collapsed; 
+                        });
+                    } 
+                    scope.expandOrCollapse = function(clickEvent) {
+                        scope.uncollapsed = !scope.uncollapsed;
+                    };
+                    
+                    /* Render childs */
+                    element.append(
+                        '<div id="fold-start-{{parent.id}}" class="fold-start fold active" ng-class="{open: uncollapsed}">' +
+                        '<p ng-click="expandOrCollapse($event)"><a></a>{{::parent.text}}</p>' +
+                        '<tl-render-logs ng-repeat="(key, value) in parent.childs" parententry="value" parentid="key"></tl-render-logs></div>'
+                    );
+                    $compile(element.contents())(scope);
+                }
+            };
+        });
+    </script>
+</head>
+<body ng-app="terminalLog">
+    <div id="log-container" ng-controller="TerminalLogCtrl">
+        <div class="log-body">
+            <a href="#" id="tail" class="log-tail" style="top: 0px;">
+              <span class="tail-status"></span>
+              <span class="tail-label button button--grey"><span class="icon icon--down"></span>
+                  Scroll to End of Log
+              </span>
+            </a>
+            <h1 ng-if="ws == null">Server disconnected! Please try again later</h1>
+            <pre id="log" class="ansi" ng-class="{'ws-disconnected': ws == null}"><tl-render-logs ng-repeat="(key, value) in log" parententry="value"></tl-render-logs></pre>
+            <a href="#" class="to-top" style="bottom: 7350px;">Top</a>
+        </div>
+    </div>
+</body>
+</html>
